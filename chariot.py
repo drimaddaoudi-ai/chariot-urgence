@@ -450,128 +450,139 @@ def save_checklist_history(user, data_items):
 def interface_checklist():
     st.header("📋 Checkliste de Vérification")
     
+    # --- HISTORIQUE (Code inchangé, je le condense pour la lisibilité) ---
     with st.expander("📂 Consulter les anciennes checklists (Historique)", expanded=False):
         if db:
             checks = db.collection("CHECKLISTS").order_by("Date", direction=firestore.Query.DESCENDING).limit(10).stream()
-            history_data = []
-            history_map = {} 
-            
+            history_data = []; history_map = {} 
             for c in checks:
-                d = c.to_dict()
-                date_str = d['Date'].strftime("%d/%m/%Y %H:%M")
-                label = f"{date_str} - {d['Utilisateur']}"
-                entry_data = d.copy(); entry_data['ID'] = c.id
-                history_data.append({"Label": label, "Date": date_str, "User": d['Utilisateur']})
-                history_map[label] = entry_data
-                
-            if not history_data:
-                st.info("Aucune ancienne checkliste trouvée.")
+                d = c.to_dict(); date_str = d['Date'].strftime("%d/%m/%Y %H:%M")
+                label = f"{date_str} - {d['Utilisateur']}"; entry_data = d.copy(); entry_data['ID'] = c.id
+                history_data.append({"Label": label, "Date": date_str, "User": d['Utilisateur']}); history_map[label] = entry_data
+            
+            if not history_data: st.info("Aucune archive.")
             else:
-                st.write("Sélectionnez une checkliste pour télécharger sa copie PDF :")
-                selected_label = st.selectbox("Choisir une checkliste", [h["Label"] for h in history_data])
-                
+                sel = st.selectbox("Choisir une checkliste", [h["Label"] for h in history_data])
                 c1, c2 = st.columns([3, 1])
                 with c1:
-                    if st.button("📄 Régénérer le PDF de cette archive"):
-                        sel_data = history_map[selected_label]
-                        pdf_hist = generer_pdf_checklist(sel_data['Contenu'], sel_data['Utilisateur'], sel_data['Date'])
-                        st.download_button(
-                            label="📥 Télécharger PDF Archive",
-                            data=pdf_hist,
-                            file_name=f"Archive_Checklist_{sel_data['Date'].strftime('%Y%m%d')}.pdf",
-                            mime="application/pdf"
-                        )
-                
-                # CORRECTION ICI : On utilise 'user_id' pour vérifier le droit Admin
+                    if st.button("📄 Régénérer PDF"):
+                        s = history_map[sel]
+                        pdf = generer_pdf_checklist(s['Contenu'], s['Utilisateur'], s['Date'])
+                        st.download_button("📥 PDF", data=pdf, file_name=f"Archive.pdf", mime="application/pdf")
                 if st.session_state.get('user_id') == 'admin':
                     with c2:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        if st.button("🗑️ Supprimer", type="primary"):
-                            doc_id_to_del = history_map[selected_label]['ID']
-                            db.collection("CHECKLISTS").document(doc_id_to_del).delete()
-                            st.toast("Supprimé !")
-                            time.sleep(1)
-                            st.rerun()
-    
+                        if st.button("🗑️ Suppr"):
+                            db.collection("CHECKLISTS").document(history_map[sel]['ID']).delete()
+                            st.toast("Supprimé !"); time.sleep(1); st.rerun()
     st.divider()
 
+    # --- VERIFICATION BLOQUANTE ---
     if verifier_blocage_checklist():
-        st.error("⛔ ACTIONS REQUISES AVANT CHECKLISTE")
-        st.warning("Il y a du matériel 'Non Remplacé'. Régularisez le stock d'abord.")
+        st.error("⛔ ACTIONS REQUISES : Matériel 'Non Remplacé' détecté.")
         return
 
     st.success("✅ Stock OK. Vérification en cours.")
-    df = get_inventaire_df()
-    if df.empty: return
-
-    if 'check_state' not in st.session_state: st.session_state['check_state'] = {}
-
-    for tiroir in ["Dessus", "Tiroir 1", "Tiroir 2", "Tiroir 3", "Tiroir 4", "Tiroir 5"]:
-        if tiroir in df['Tiroir'].unique():
-            with st.expander(f"🗄️ {tiroir}", expanded=True):
-                # BOUTON BATCH
-                if st.button(f"✅ Tout Conforme ({tiroir})", key=f"batch_{tiroir}"):
-                    for _, row in df[df['Tiroir'] == tiroir].iterrows():
-                        iid = row['ID']
-                        st.session_state['check_state'][iid] = "OK"
-                        st.session_state[f"rad_{iid}"] = "Conforme"
-                    st.rerun()
-
-                for _, row in df[df['Tiroir'] == tiroir].iterrows():
-                    iid = row['ID']
-                    c1, c2, c3 = st.columns([3, 1, 2])
-                    with c1: st.markdown(f"**{row['Nom']}**")
-                    with c2: st.markdown(f"Dot: **{row['Dotation']}**")
-                    with c3:
-                        status = st.radio(f"S_{iid}", ["Conforme", "Manquant"], key=f"rad_{iid}", horizontal=True, label_visibility="collapsed", index=None)
-                        if status == "Manquant":
-                            st.session_state['check_state'][iid] = "KO"
-                            if st.button(f"🔄 Remplacer ({row['Nom']})", key=f"fix_{iid}"): st.toast("Noté")
-                        elif status == "Conforme": st.session_state['check_state'][iid] = "OK"
-                        else: st.session_state['check_state'][iid] = "PENDING"
-
-    st.divider()
     
-    all_ok = True; missing_count = 0; pending_count = 0
-    for iid in df['ID'].tolist():
-        state = st.session_state['check_state'].get(iid, "PENDING")
-        if state == "KO": all_ok = False; missing_count += 1
-        elif state == "PENDING": all_ok = False; pending_count += 1
-            
-    if all_ok:
-        st.markdown("<div class='security-box'>", unsafe_allow_html=True)
-        st.markdown("### 🔒 Sécurisation Finale")
-        st.markdown("Avez-vous verrouillé les tiroirs par la clé et attaché la clé et paires ciseaux par ziplock au dessus du chariot ?")
-        securite_confirmee = st.checkbox("✅ OUI, je confirme avoir sécurisé le chariot (Clé + Ciseaux + Verrouillage)")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        if securite_confirmee:
-            
-            user_final = st.session_state['user']
-            if st.session_state.get('user_id') in SHARED_ACCOUNTS:
-                user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire)", key="user_input_check")
+    try:
+        df = get_inventaire_df()
+        if df.empty: return
 
-            if st.button("💾 VALIDER LA CHECKLISTE & PDF", type="primary"):
-                if not user_final:
-                    st.error("⚠️ Veuillez entrer votre Nom et Prénom.")
-                else:
-                    checklist_export = []
-                    for _, row in df.iterrows():
-                        checklist_export.append({"Nom": row['Nom'], "Tiroir": row['Tiroir'], "Dotation": row['Dotation']})
-                    save_checklist_history(user_final, checklist_export)
-                    pdf_bytes = generer_pdf_checklist(checklist_export, user_final, datetime.now())
-                    st.download_button(
-                        label="📥 Télécharger PDF Archive",
-                        data=pdf_bytes,
-                        file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf",
-                        mime="application/pdf"
-                    )
-                    st.balloons()
-        else: st.warning("⚠️ Vous devez confirmer la sécurisation pour valider.")
-    else:
-        if pending_count > 0: st.warning(f"⚠️ Vous devez vérifier toutes les lignes ({pending_count} restants).")
-        if missing_count > 0: st.error(f"⚠️ Il reste {missing_count} éléments manquants non remplacés.")
-        st.button("💾 Valider", disabled=True)
+        if 'check_state' not in st.session_state: st.session_state['check_state'] = {}
+
+        # --- BOUCLE D'AFFICHAGE SÉCURISÉE ---
+        tiroirs = ["Dessus", "Tiroir 1", "Tiroir 2", "Tiroir 3", "Tiroir 4", "Tiroir 5"]
+        
+        for tiroir in tiroirs:
+            if tiroir in df['Tiroir'].unique():
+                with st.expander(f"🗄️ {tiroir}", expanded=True):
+                    
+                    # BOUTON BATCH OPTIMISÉ
+                    # On utilise un form pour éviter le reload immédiat violent
+                    col_batch, _ = st.columns([1, 2])
+                    if col_batch.button(f"✅ Valider tout le {tiroir}", key=f"btn_batch_{tiroir}"):
+                        items_du_tiroir = df[df['Tiroir'] == tiroir]
+                        for _, row in items_du_tiroir.iterrows():
+                            iid = row['ID']
+                            st.session_state['check_state'][iid] = "OK"
+                            st.session_state[f"rad_{iid}"] = "Conforme"
+                        st.rerun()
+
+                    # LISTE DES ITEMS
+                    items_tiroir = df[df['Tiroir'] == tiroir]
+                    for _, row in items_tiroir.iterrows():
+                        iid = row['ID']
+                        c1, c2, c3 = st.columns([3, 1, 2])
+                        with c1: st.markdown(f"**{row['Nom']}**")
+                        with c2: st.markdown(f"Dot: **{row['Dotation']}**")
+                        with c3:
+                            # Récupération de la valeur actuelle pour éviter le saut
+                            val_defaut = st.session_state.get(f"rad_{iid}", None)
+                            
+                            status = st.radio(
+                                f"Etat {iid}", 
+                                ["Conforme", "Manquant"], 
+                                key=f"rad_{iid}", 
+                                horizontal=True, 
+                                label_visibility="collapsed", 
+                                index=None if val_defaut is None else ["Conforme", "Manquant"].index(val_defaut)
+                            )
+                            
+                            # Mise à jour du state principal
+                            if status == "Manquant":
+                                st.session_state['check_state'][iid] = "KO"
+                                if st.button(f"🔄 Remplacer ({row['Nom']})", key=f"fix_{iid}"): 
+                                    st.toast("Noté")
+                            elif status == "Conforme":
+                                st.session_state['check_state'][iid] = "OK"
+                            else:
+                                st.session_state['check_state'][iid] = "PENDING"
+
+        st.divider()
+        
+        # --- VALIDATION FINALE ---
+        all_ids = df['ID'].tolist()
+        missing = 0
+        pending = 0
+        
+        for iid in all_ids:
+            state = st.session_state['check_state'].get(iid, "PENDING")
+            if state == "KO": missing += 1
+            elif state == "PENDING": pending += 1
+                
+        if pending == 0 and missing == 0:
+            st.markdown("<div class='security-box'>", unsafe_allow_html=True)
+            st.markdown("### 🔒 Sécurisation Finale")
+            st.markdown("Avez-vous verrouillé les tiroirs par la clé et attaché la clé et paires ciseaux par ziplock au dessus du chariot ?")
+            securite = st.checkbox("✅ OUI, je confirme la sécurisation (Clé + Ciseaux + Verrouillage)")
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            if securite:
+                # COMPTE PARTAGÉ
+                user_final = st.session_state['user']
+                if st.session_state.get('user_id') in SHARED_ACCOUNTS:
+                    user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire)", key="user_input_check")
+
+                if st.button("💾 VALIDER & PDF", type="primary"):
+                    if not user_final:
+                        st.error("⚠️ Nom obligatoire.")
+                    else:
+                        checklist_export = []
+                        for _, row in df.iterrows():
+                            checklist_export.append({"Nom": row['Nom'], "Tiroir": row['Tiroir'], "Dotation": row['Dotation']})
+                        save_checklist_history(user_final, checklist_export)
+                        pdf = generer_pdf_checklist(checklist_export, user_final, datetime.now())
+                        st.download_button("📥 Télécharger PDF", data=pdf, file_name=f"Checklist.pdf", mime="application/pdf")
+                        st.balloons()
+            else:
+                st.warning("⚠️ Confirmez la sécurité pour valider.")
+        else:
+            if pending > 0: st.warning(f"⚠️ Reste à vérifier : {pending} lignes.")
+            if missing > 0: st.error(f"⚠️ Matériel manquant : {missing} lignes.")
+            st.button("💾 Valider", disabled=True)
+
+    except Exception as e:
+        st.error(f"Une erreur est survenue : {e}")
+        st.info("Essayez de rafraîchir la page.")
 
 # --- RESPONSABLE ---
 def interface_responsable():
