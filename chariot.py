@@ -6,6 +6,7 @@ from datetime import datetime
 import time
 from fpdf import FPDF
 import os
+import json # Correction : import placé au bon endroit
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
@@ -64,7 +65,25 @@ st.markdown("""
 def get_db():
     try:
         if not firebase_admin._apps:
-            cred = credentials.Certificate("firestore_key.json")
+            # 1. On essaie de lire les secrets Streamlit (Cloud)
+            if "firestore" in st.secrets:
+                # On convertit l'objet secrets en dictionnaire standard
+                key_dict = dict(st.secrets["firestore"])
+                
+                # Correction critique pour la clé privée sur le Cloud
+                if "private_key" in key_dict:
+                    key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
+                
+                cred = credentials.Certificate(key_dict)
+            
+            # 2. Sinon, on cherche le fichier local (Ton PC)
+            else:
+                if os.path.exists("firestore_key.json"):
+                    cred = credentials.Certificate("firestore_key.json")
+                else:
+                    st.error("🚨 Configuration introuvable : Ni Secrets Streamlit, ni fichier local.")
+                    return None
+                
             firebase_admin.initialize_app(cred)
         return firestore.client()
     except Exception as e:
@@ -76,6 +95,7 @@ db = get_db()
 # --- 2. FONCTIONS MÉTIER ---
 
 def get_inventaire_df():
+    if db is None: return pd.DataFrame()
     docs = db.collection("INVENTAIRE").stream()
     items = []
     for doc in docs:
@@ -101,6 +121,7 @@ def maj_panier():
                 del st.session_state['panier'][item_id]
 
 def valider_panier(panier, ip, utilisateur):
+    if db is None: return False
     batch = db.batch()
     details_list = [] 
     details_texte = []
@@ -135,6 +156,7 @@ def valider_panier(panier, ip, utilisateur):
     return True
 
 def effectuer_remplacement_partiel(log_id, log_data, items_coches, user_remplacant):
+    if db is None: return False
     batch = db.batch()
     items_struct = log_data.get('Details_Struct', [])
     tout_est_remplace = True
@@ -179,7 +201,7 @@ def effectuer_remplacement_partiel(log_id, log_data, items_coches, user_remplaca
     return tout_est_remplace
 
 def supprimer_log(log_id):
-    db.collection("LOGS").document(log_id).delete()
+    if db: db.collection("LOGS").document(log_id).delete()
 
 # --- GENERATION PDF ---
 class PDF(FPDF):
@@ -246,14 +268,14 @@ def generer_pdf_checklist(data_checklist, user, date_check):
 
 # --- AUTHENTIFICATION ---
 def check_login(username, password):
-    """Vérifie le login dans Firestore"""
+    if db is None: return None
     doc_ref = db.collection("UTILISATEURS").document(username)
     doc = doc_ref.get()
     
     if doc.exists:
         data = doc.to_dict()
         if data['password'] == password:
-            return data # Retourne les infos (Nom, Rôle...)
+            return data
     return None
 
 def login_page():
@@ -266,17 +288,15 @@ def login_page():
             user_info = check_login(user_id, pwd)
             if user_info:
                 st.session_state['logged_in'] = True
-                # On stocke le vrai nom complet pour l'affichage
                 st.session_state['user'] = f"{user_info['prenom']} {user_info['nom']}"
                 st.session_state['role'] = user_info['role']
-                # Init variables
                 if 'panier' not in st.session_state: st.session_state['panier'] = {}
                 if 'check_state' not in st.session_state: st.session_state['check_state'] = {}
                 st.rerun()
             else:
                 st.error("Identifiant ou mot de passe incorrect.")
 
-# --- INTERFACE CONSOMMATION ---
+# --- INTERFACES PRECEDENTES ---
 def afficher_ligne_conso(row):
     try: stock = int(row['Stock_Actuel']); dotation = int(row['Dotation'])
     except: stock, dotation = 0, 0
@@ -342,6 +362,7 @@ def interface_consommateur():
 # --- INTERFACE REMPLACEMENT ---
 def interface_remplacement():
     st.header("🔄 Remplacer")
+    if db is None: return
     logs_ref = db.collection("LOGS").order_by("Date", direction=firestore.Query.DESCENDING).stream()
     count = 0
     for doc in logs_ref:
@@ -370,6 +391,7 @@ def interface_remplacement():
 # --- INTERFACE HISTORIQUE ---
 def interface_historique():
     st.header("📜 Historique de consommation")
+    if db is None: return
     logs_ref = db.collection("LOGS").order_by("Date", direction=firestore.Query.DESCENDING).limit(50).stream()
     data = []
     for doc in logs_ref:
@@ -397,57 +419,60 @@ def interface_historique():
 
 # --- INTERFACE CHECKLISTE ---
 def verifier_blocage_checklist():
+    if db is None: return False
     logs_ref = db.collection("LOGS").where("Statut", "==", "Non remplacé").stream()
     items_manquants = []
     for doc in logs_ref: items_manquants.append(doc.id)
     return len(items_manquants) > 0
 
 def save_checklist_history(user, data_items):
-    doc_data = {"Date": datetime.now(), "Utilisateur": user, "Statut": "Validé", "Contenu": data_items, "Securite_Verrou": True, "Securite_Attache": True}
-    db.collection("CHECKLISTS").add(doc_data)
+    if db:
+        doc_data = {"Date": datetime.now(), "Utilisateur": user, "Statut": "Validé", "Contenu": data_items, "Securite_Verrou": True, "Securite_Attache": True}
+        db.collection("CHECKLISTS").add(doc_data)
 
 def interface_checklist():
     st.header("📋 Checkliste de Vérification")
     
     with st.expander("📂 Consulter les anciennes checklists (Historique)", expanded=False):
-        checks = db.collection("CHECKLISTS").order_by("Date", direction=firestore.Query.DESCENDING).limit(10).stream()
-        history_data = []
-        history_map = {} 
-        
-        for c in checks:
-            d = c.to_dict()
-            date_str = d['Date'].strftime("%d/%m/%Y %H:%M")
-            label = f"{date_str} - {d['Utilisateur']}"
-            entry_data = d.copy(); entry_data['ID'] = c.id
-            history_data.append({"Label": label, "Date": date_str, "User": d['Utilisateur']})
-            history_map[label] = entry_data
+        if db:
+            checks = db.collection("CHECKLISTS").order_by("Date", direction=firestore.Query.DESCENDING).limit(10).stream()
+            history_data = []
+            history_map = {} 
             
-        if not history_data:
-            st.info("Aucune ancienne checkliste trouvée.")
-        else:
-            st.write("Sélectionnez une checkliste pour télécharger sa copie PDF :")
-            selected_label = st.selectbox("Choisir une checkliste", [h["Label"] for h in history_data])
-            
-            c1, c2 = st.columns([3, 1])
-            with c1:
-                if st.button("📄 Régénérer le PDF de cette archive"):
-                    sel_data = history_map[selected_label]
-                    pdf_hist = generer_pdf_checklist(sel_data['Contenu'], sel_data['Utilisateur'], sel_data['Date'])
-                    st.download_button(
-                        label="📥 Télécharger PDF Archive",
-                        data=pdf_hist,
-                        file_name=f"Archive_Checklist_{sel_data['Date'].strftime('%Y%m%d')}.pdf",
-                        mime="application/pdf"
-                    )
-            if st.session_state['user'] == 'admin':
-                with c2:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("🗑️ Supprimer", type="primary"):
-                        doc_id_to_del = history_map[selected_label]['ID']
-                        db.collection("CHECKLISTS").document(doc_id_to_del).delete()
-                        st.toast("Supprimé !")
-                        time.sleep(1)
-                        st.rerun()
+            for c in checks:
+                d = c.to_dict()
+                date_str = d['Date'].strftime("%d/%m/%Y %H:%M")
+                label = f"{date_str} - {d['Utilisateur']}"
+                entry_data = d.copy(); entry_data['ID'] = c.id
+                history_data.append({"Label": label, "Date": date_str, "User": d['Utilisateur']})
+                history_map[label] = entry_data
+                
+            if not history_data:
+                st.info("Aucune ancienne checkliste trouvée.")
+            else:
+                st.write("Sélectionnez une checkliste pour télécharger sa copie PDF :")
+                selected_label = st.selectbox("Choisir une checkliste", [h["Label"] for h in history_data])
+                
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    if st.button("📄 Régénérer le PDF de cette archive"):
+                        sel_data = history_map[selected_label]
+                        pdf_hist = generer_pdf_checklist(sel_data['Contenu'], sel_data['Utilisateur'], sel_data['Date'])
+                        st.download_button(
+                            label="📥 Télécharger PDF Archive",
+                            data=pdf_hist,
+                            file_name=f"Archive_Checklist_{sel_data['Date'].strftime('%Y%m%d')}.pdf",
+                            mime="application/pdf"
+                        )
+                if st.session_state.get('user') == 'admin':
+                    with c2:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("🗑️ Supprimer", type="primary"):
+                            doc_id_to_del = history_map[selected_label]['ID']
+                            db.collection("CHECKLISTS").document(doc_id_to_del).delete()
+                            st.toast("Supprimé !")
+                            time.sleep(1)
+                            st.rerun()
     
     st.divider()
 
@@ -518,13 +543,14 @@ def interface_responsable():
     with tab2: interface_historique()
     with tab3:
         st.header("Historique des Checklists")
-        checks = db.collection("CHECKLISTS").order_by("Date", direction=firestore.Query.DESCENDING).limit(20).stream()
-        data = []
-        for c in checks:
-            d = c.to_dict()
-            data.append({"Date": d['Date'].strftime("%d/%m/%Y %H:%M"), "Utilisateur": d['Utilisateur'], "Statut": d['Statut']})
-        if data: st.dataframe(pd.DataFrame(data), use_container_width=True)
-        else: st.info("Aucune checkliste.")
+        if db:
+            checks = db.collection("CHECKLISTS").order_by("Date", direction=firestore.Query.DESCENDING).limit(20).stream()
+            data = []
+            for c in checks:
+                d = c.to_dict()
+                data.append({"Date": d['Date'].strftime("%d/%m/%Y %H:%M"), "Utilisateur": d['Utilisateur'], "Statut": d['Statut']})
+            if data: st.dataframe(pd.DataFrame(data), use_container_width=True)
+            else: st.info("Aucune checkliste.")
 
 # --- MENU PRINCIPAL ---
 def main():
