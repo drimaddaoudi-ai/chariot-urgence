@@ -68,34 +68,52 @@ SHARED_ACCOUNTS = ["infirmier", "resident", "interne"]
 @st.cache_resource
 def get_db():
     try:
-        if not firebase_admin._apps:
-            # 1. D'abord on vérifie le fichier local (Pour éviter l'erreur sur PC)
-            if os.path.exists("firestore_key.json"):
-                cred = credentials.Certificate("firestore_key.json")
-            
-            # 2. Sinon, on essaie les Secrets (Pour le Cloud)
-            else:
-                # On utilise un try/except pour éviter que st.secrets ne fasse planter l'app locale
-                try:
-                    if "firestore" in st.secrets:
-                        key_dict = dict(st.secrets["firestore"])
-                        if "private_key" in key_dict:
-                            key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
-                        cred = credentials.Certificate(key_dict)
-                    else:
-                        st.error("🚨 Pas de fichier JSON local ni de Secrets configurés.")
-                        return None
-                except Exception:
-                    st.error("🚨 Fichier 'firestore_key.json' introuvable. Veuillez le placer dans le dossier.")
-                    return None
+        # 0) Si déjà initialisé
+        if firebase_admin._apps:
+            return firestore.client()
 
-            firebase_admin.initialize_app(cred)
+        cred = None
+
+        # 1) Priorité au fichier local (dev)
+        local_path = "firestore_key.json"
+        if os.path.exists(local_path):
+            cred = credentials.Certificate(local_path)
+
+        # 2) Sinon essayer st.secrets (cloud OU local avec .streamlit/secrets.toml)
+        else:
+            try:
+                fs = st.secrets["firestore"]  # peut lever si secrets absent
+                key_dict = dict(fs)
+
+                # Corriger les retours à la ligne de private_key
+                if "private_key" in key_dict and isinstance(key_dict["private_key"], str):
+                    key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
+
+                cred = credentials.Certificate(key_dict)
+
+            except Exception as se:
+                st.error(
+                    "🚨 Configuration Firebase introuvable.\n\n"
+                    "Local: ajoute `.streamlit/secrets.toml` ou `firestore_key.json`.\n"
+                    "Cloud: ajoute les secrets dans Streamlit Cloud > App settings > Secrets."
+                )
+                print("Erreur secrets:", se)
+                return None
+
+        firebase_admin.initialize_app(cred)
         return firestore.client()
+
     except Exception as e:
         st.error(f"🚨 Erreur BDD: {e}")
+        traceback.print_exc()
         return None
 
 db = get_db()
+if db is not None:
+    st.sidebar.success("✅ Firestore connecté")
+else:
+    st.sidebar.error("❌ Firestore non connecté")
+
 
 # --- 2. FONCTIONS MÉTIER ---
 
