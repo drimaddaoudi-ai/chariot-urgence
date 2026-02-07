@@ -70,39 +70,63 @@ DEBUG_LOGIN = False  # passe à True temporairement si besoin diagnostic
 @st.cache_resource
 def get_db():
     try:
-        # 0) Si déjà initialisé
         if firebase_admin._apps:
             return firestore.client()
 
         cred = None
+        source = None
 
-        # 1) Priorité au fichier local (dev)
+        # 1) Fichier local (dev)
         local_path = "firestore_key.json"
         if os.path.exists(local_path):
             cred = credentials.Certificate(local_path)
+            source = f"local file: {local_path}"
 
-        # 2) Sinon essayer st.secrets (cloud OU local avec .streamlit/secrets.toml)
+        # 2) Secrets Streamlit
         else:
             try:
-                fs = st.secrets["firestore"]  # peut lever si secrets absent
-                key_dict = dict(fs)
+                secret_keys = list(st.secrets.keys())
+                # Aide debug (sans exposer les valeurs)
+                print("st.secrets keys =", secret_keys)
 
-                # Corriger les retours à la ligne de private_key
-                if "private_key" in key_dict and isinstance(key_dict["private_key"], str):
-                    key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
+                key_dict = None
+
+                # Format attendu: [firestore] ...
+                if "firestore" in st.secrets:
+                    key_dict = dict(st.secrets["firestore"])
+
+                # Fallback: secrets plats (si collés sans section)
+                else:
+                    required = [
+                        "type", "project_id", "private_key", "client_email", "token_uri"
+                    ]
+                    if all(k in st.secrets for k in required):
+                        key_dict = {k: st.secrets[k] for k in st.secrets.keys()}
+
+                if key_dict is None:
+                    st.error(
+                        "🚨 Secrets non trouvés. Vérifie la section [firestore] dans Streamlit Cloud > Settings > Secrets."
+                    )
+                    return None
+
+                # Normalisation private_key
+                pk = key_dict.get("private_key", "")
+                if isinstance(pk, str):
+                    if "\\n" in pk:
+                        key_dict["private_key"] = pk.replace("\\n", "\n")
+                    else:
+                        key_dict["private_key"] = pk
 
                 cred = credentials.Certificate(key_dict)
+                source = "streamlit secrets"
 
             except Exception as se:
-                st.error(
-                    "🚨 Configuration Firebase introuvable.\n\n"
-                    "Local: ajoute `.streamlit/secrets.toml` ou `firestore_key.json`.\n"
-                    "Cloud: ajoute les secrets dans Streamlit Cloud > App settings > Secrets."
-                )
-                print("Erreur secrets:", se)
+                st.error(f"🚨 Erreur lecture secrets: {se}")
+                traceback.print_exc()
                 return None
 
         firebase_admin.initialize_app(cred)
+        print(f"Firebase initialized from {source}")
         return firestore.client()
 
     except Exception as e:
@@ -110,11 +134,19 @@ def get_db():
         traceback.print_exc()
         return None
 
+
 db = get_db()
 if db is not None:
     st.sidebar.success("✅ Firestore connecté")
+    try:
+        db.collection("UTILISATEURS").limit(1).get()
+        st.sidebar.info("✅ Lecture UTILISATEURS OK")
+    except Exception as e:
+        st.sidebar.error("❌ Connecté mais lecture refusée")
+        st.sidebar.caption(str(e))
 else:
     st.sidebar.error("❌ Firestore non connecté")
+
 
 # --- 2. FONCTIONS MÉTIER ---
 
