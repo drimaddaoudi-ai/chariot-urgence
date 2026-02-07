@@ -77,12 +77,10 @@ def get_db():
                 if os.path.exists("firestore_key.json"):
                     cred = credentials.Certificate("firestore_key.json")
                 else:
-                    st.error("🚨 Configuration introuvable : Ni Secrets Streamlit, ni fichier local.")
                     return None
             firebase_admin.initialize_app(cred)
         return firestore.client()
     except Exception as e:
-        st.error(f"🚨 Erreur BDD: {e}")
         return None
 
 db = get_db()
@@ -91,19 +89,22 @@ db = get_db()
 
 def get_inventaire_df():
     if db is None: return pd.DataFrame()
-    docs = db.collection("INVENTAIRE").stream()
-    items = []
-    for doc in docs:
-        data = doc.to_dict()
-        data['ID'] = doc.id
-        items.append(data)
-    if not items: return pd.DataFrame()
-    
-    df = pd.DataFrame(items)
-    if 'ID' in df.columns:
-        df = df.drop_duplicates(subset=['ID'], keep='first')
-        df = df.sort_values(by='ID')
-    return df
+    try:
+        docs = db.collection("INVENTAIRE").stream()
+        items = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['ID'] = doc.id
+            items.append(data)
+        if not items: return pd.DataFrame()
+        
+        df = pd.DataFrame(items)
+        if 'ID' in df.columns:
+            df = df.drop_duplicates(subset=['ID'], keep='first')
+            df = df.sort_values(by='ID')
+        return df
+    except:
+        return pd.DataFrame()
 
 def maj_panier():
     for key in st.session_state:
@@ -205,7 +206,6 @@ class PDF(FPDF):
             self.image("logo_chu.png", 170, 8, 30)
         if os.path.exists("logo_service.png"):
             self.image("logo_service.png", 10, 8, 30)
-        
         self.set_font('Helvetica', 'B', 15)
         self.cell(0, 10, 'CHECKLISTE CHARIOT URGENCE', 0, 1, 'C')
         self.set_font('Helvetica', 'I', 10)
@@ -221,56 +221,53 @@ def generer_pdf_checklist(data_checklist, user, date_check):
     pdf = PDF()
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
-    
     date_fmt = date_check.strftime("%d/%m/%Y à %H:%M")
     pdf.multi_cell(0, 10, f"La checkliste de Chariot d'Urgence RME a été faite le {date_fmt} par l'utilisateur {user}.\nStatut : VALIDÉE (Conforme)", align='C')
     pdf.ln(10)
-    
     pdf.set_fill_color(200, 220, 255)
     pdf.set_font("Helvetica", 'B', 10)
     pdf.cell(90, 10, "Matériel", 1, 0, 'C', True)
     pdf.cell(30, 10, "Tiroir", 1, 0, 'C', True)
     pdf.cell(30, 10, "Dotation", 1, 0, 'C', True)
     pdf.cell(30, 10, "État", 1, 1, 'C', True)
-    
     pdf.set_font("Helvetica", size=9)
     for item in data_checklist:
-        try:
-            nom = item['Nom'].encode('latin-1', 'replace').decode('latin-1')
-        except:
-            nom = item['Nom']
-            
+        try: nom = item['Nom'].encode('latin-1', 'replace').decode('latin-1')
+        except: nom = item['Nom']
         tiroir = str(item['Tiroir'])
         dotation = str(item['Dotation'])
-        
         pdf.cell(90, 8, nom, 1)
         pdf.cell(30, 8, tiroir, 1, 0, 'C')
         pdf.cell(30, 8, dotation, 1, 0, 'C')
         pdf.cell(30, 8, "[X] OK", 1, 1, 'C')
-        
     pdf.set_font("Helvetica", 'B', 9) 
     pdf.set_fill_color(240, 240, 240) 
-
     pdf.cell(150, 8, "Tiroirs verrouillés par la clé", 1, 0, 'L', True)
     pdf.cell(30, 8, "[X] OUI", 1, 1, 'C', True)
     pdf.cell(150, 8, "Clé et paire de ciseaux attachés au chariot (Ziplock)", 1, 0, 'L', True)
     pdf.cell(30, 8, "[X] OUI", 1, 1, 'C', True)
-
     pdf.ln(10)
     pdf.cell(0, 10, f"Checkliste générée le {datetime.now().strftime('%d/%m/%Y %H:%M')}", 0, 1, 'R')
-    
     return bytes(pdf.output())
 
 # --- AUTHENTIFICATION ---
 def check_login(username, password):
     if db is None: return None
-    doc_ref = db.collection("UTILISATEURS").document(username)
-    doc = doc_ref.get()
+    # FIX: Sécurité anti-crash si champ vide
+    if not username: return None
     
-    if doc.exists:
-        data = doc.to_dict()
-        if data['password'] == password:
-            return data
+    try:
+        # FIX: .strip() pour enlever les espaces
+        doc_ref = db.collection("UTILISATEURS").document(username.strip())
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            # FIX: .get() pour éviter le crash si 'password' n'existe pas
+            if data.get('password') == password:
+                return data
+    except Exception as e:
+        print(f"Erreur login: {e}")
+        return None
     return None
 
 def login_page():
@@ -280,36 +277,37 @@ def login_page():
         user_id = st.text_input("Identifiant")
         pwd = st.text_input("Mot de passe", type="password")
         if st.form_submit_button("Se Connecter"):
-            user_info = check_login(user_id, pwd)
-            if user_info:
-                st.session_state['logged_in'] = True
-                st.session_state['user_id'] = user_id 
-                st.session_state['user'] = f"{user_info['prenom']} {user_info['nom']}"
-                st.session_state['role'] = user_info['role']
-                
-                if 'panier' not in st.session_state: st.session_state['panier'] = {}
-                if 'check_state' not in st.session_state: st.session_state['check_state'] = {}
-                st.rerun()
+            # FIX: Vérification avant appel
+            if not user_id or not pwd:
+                st.warning("Veuillez remplir tous les champs.")
             else:
-                st.error("Identifiant ou mot de passe incorrect.")
+                user_info = check_login(user_id, pwd)
+                if user_info:
+                    st.session_state['logged_in'] = True
+                    st.session_state['user_id'] = user_id.strip()
+                    # FIX: .get() pour éviter le crash si 'prenom' ou 'nom' manquent
+                    p = user_info.get('prenom', '')
+                    n = user_info.get('nom', '')
+                    st.session_state['user'] = f"{p} {n}".strip()
+                    st.session_state['role'] = user_info.get('role', 'Utilisateur')
+                    
+                    if 'panier' not in st.session_state: st.session_state['panier'] = {}
+                    if 'check_state' not in st.session_state: st.session_state['check_state'] = {}
+                    st.rerun()
+                else:
+                    st.error("Identifiant ou mot de passe incorrect.")
 
 # --- INTERFACES PRECEDENTES ---
 def afficher_ligne_conso(row):
     try: stock = int(row['Stock_Actuel']); dotation = int(row['Dotation'])
     except: stock, dotation = 0, 0
-    
     if stock < dotation: couleur = "red"
     else: couleur = "green"
-    
     text_stock = f":{couleur}[**{stock}/{dotation}**]"
-    cat = str(row['Categorie'])
-    infos = f"| {cat}" if cat.lower() != 'nan' and cat.strip() != "" else ""
-    
+    cat = str(row['Categorie']); infos = f"| {cat}" if cat.lower() != 'nan' and cat.strip() != "" else ""
     with st.container(border=True):
         c1, c2, c3, c4 = st.columns([3, 1, 0.3, 1.5])
-        with c1: 
-            st.markdown(f"**{row['Nom']}**")
-            if infos: st.caption(infos)
+        with c1: st.markdown(f"**{row['Nom']}**"); st.caption(infos) if infos else None
         with c2: st.markdown(text_stock)
         with c3: st.markdown("<div class='icon-text'>📉</div>", unsafe_allow_html=True) 
         with c4:
@@ -320,7 +318,6 @@ def interface_consommateur():
     st.header(f"💊 Consommation")
     df = get_inventaire_df()
     if df.empty: return
-    
     if st.session_state.get('panier'):
         nb_items = sum(st.session_state['panier'].values())
         st.markdown(f"""<div class="panier-box">🛒 PANIER : {nb_items} articles</div>""", unsafe_allow_html=True)
@@ -330,32 +327,25 @@ def interface_consommateur():
                 nom_row = df[df['ID'] == pid]
                 if not nom_row.empty: st.write(f"- {q} x **{nom_row['Nom'].values[0]}**")
             st.divider()
-            
             ip_input = st.text_input("🏥 IP DU PATIENT", placeholder="Ex: 24/12345")
-            
             user_final = st.session_state['user']
             if st.session_state.get('user_id') in SHARED_ACCOUNTS:
                 user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire pour traçabilité)", key="user_input_conso")
-            
             c1, c2 = st.columns([2,1])
             if c1.button("🚀 ENREGISTRER", type="primary"):
-                if not ip_input: 
-                    st.error("⚠️ IP obligatoire")
-                elif not user_final:
-                    st.error("⚠️ Veuillez entrer votre Nom et Prénom.")
+                if not ip_input: st.error("⚠️ IP obligatoire")
+                elif not user_final: st.error("⚠️ Veuillez entrer votre Nom et Prénom.")
                 else:
                     valider_panier(st.session_state['panier'], ip_input, user_final)
                     st.session_state['panier'] = {}
                     for k in list(st.session_state.keys()):
                         if k.startswith("input_"): del st.session_state[k]
                     time.sleep(1); st.success("Enregistré !"); st.rerun()
-            
             if c2.button("🗑️ Vider"):
                 st.session_state['panier'] = {}
                 for k in list(st.session_state.keys()):
                     if k.startswith("input_"): del st.session_state[k]
                 st.rerun()
-    
     recherche = st.text_input("🔍 Rechercher...")
     if recherche:
         masque = df['Nom'].str.contains(recherche, case=False, na=False)
@@ -366,7 +356,6 @@ def interface_consommateur():
                 with st.expander(f"🗄️ {tiroir}"):
                     for _, row in df[df['Tiroir'] == tiroir].iterrows(): afficher_ligne_conso(row)
 
-# --- INTERFACE REMPLACEMENT ---
 def interface_remplacement():
     st.header("🔄 Remplacer")
     if db is None: return
@@ -388,22 +377,17 @@ def interface_remplacement():
                     if item.get('EstRemplace', False): st.markdown(f"~~✅ {nom}~~")
                     else:
                         if st.checkbox(f"🔴 {nom}", key=f"chk_{log_id}_{item['ID']}"): to_repl.append(item['ID'])
-                
                 user_final = st.session_state['user']
                 if st.session_state.get('user_id') in SHARED_ACCOUNTS:
                     user_final = st.text_input("👤 Votre Nom et Prénom", key=f"user_input_repl_{log_id}")
-
                 if st.form_submit_button("💾 Valider"):
-                    if not to_repl: 
-                        st.warning("Rien coché")
-                    elif not user_final:
-                        st.error("⚠️ Nom obligatoire")
+                    if not to_repl: st.warning("Rien coché")
+                    elif not user_final: st.error("⚠️ Nom obligatoire")
                     else:
                         fin = effectuer_remplacement_partiel(log_id, l, to_repl, user_final)
                         st.success("Fait !" if fin else "Partiel enregistré"); time.sleep(1); st.rerun()
     if count == 0: st.success("Tout est à jour !")
 
-# --- INTERFACE HISTORIQUE ---
 def interface_historique():
     st.header("📜 Historique de consommation")
     if db is None: return
@@ -418,12 +402,9 @@ def interface_historique():
             st_fmt = "🟢 Remplacé"; remp = f"{l.get('Utilisateur_Remplacement')} ({ds})"
         det = "\n".join([f"{'✅' if i.get('EstRemplace') else '🔴'} {i['Qte']}x {i['Nom']}" for i in l.get('Details_Struct', [])])
         data.append({"Date": l['Date'].strftime("%d/%m %H:%M"), "IP": l.get('IP_Patient'), "User": l.get('Utilisateur'), "Mat": det, "St": st_fmt, "Remp": remp, "ID": log_id, "Suppr": False})
-    
     if data:
         df = pd.DataFrame(data)
         cfg = {"Mat": st.column_config.TextColumn("Détail", width="large"), "ID": None}
-        
-        # CORRECTION ICI : On utilise 'user_id' pour vérifier le droit Admin
         if st.session_state.get('user_id') == 'admin':
             res = st.data_editor(df, column_config=cfg, hide_index=True, use_container_width=True, disabled=["Date","IP","User","Mat","St","Remp"])
             to_del = res[res["Suppr"]==True]
@@ -450,7 +431,6 @@ def save_checklist_history(user, data_items):
 def interface_checklist():
     st.header("📋 Checkliste de Vérification")
     
-    # --- HISTORIQUE (Code inchangé, je le condense pour la lisibilité) ---
     with st.expander("📂 Consulter les anciennes checklists (Historique)", expanded=False):
         if db:
             checks = db.collection("CHECKLISTS").order_by("Date", direction=firestore.Query.DESCENDING).limit(10).stream()
@@ -471,12 +451,12 @@ def interface_checklist():
                         st.download_button("📥 PDF", data=pdf, file_name=f"Archive.pdf", mime="application/pdf")
                 if st.session_state.get('user_id') == 'admin':
                     with c2:
+                        st.markdown("<br>", unsafe_allow_html=True)
                         if st.button("🗑️ Suppr"):
                             db.collection("CHECKLISTS").document(history_map[sel]['ID']).delete()
                             st.toast("Supprimé !"); time.sleep(1); st.rerun()
     st.divider()
 
-    # --- VERIFICATION BLOQUANTE ---
     if verifier_blocage_checklist():
         st.error("⛔ ACTIONS REQUISES : Matériel 'Non Remplacé' détecté.")
         return
@@ -489,61 +469,38 @@ def interface_checklist():
 
         if 'check_state' not in st.session_state: st.session_state['check_state'] = {}
 
-        # --- BOUCLE D'AFFICHAGE SÉCURISÉE ---
+        # Initialisation du download state si nécessaire
+        if 'pdf_ready' not in st.session_state: st.session_state['pdf_ready'] = None
+
         tiroirs = ["Dessus", "Tiroir 1", "Tiroir 2", "Tiroir 3", "Tiroir 4", "Tiroir 5"]
-        
         for tiroir in tiroirs:
             if tiroir in df['Tiroir'].unique():
                 with st.expander(f"🗄️ {tiroir}", expanded=True):
-                    
-                    # BOUTON BATCH OPTIMISÉ
-                    # On utilise un form pour éviter le reload immédiat violent
                     col_batch, _ = st.columns([1, 2])
                     if col_batch.button(f"✅ Valider tout le {tiroir}", key=f"btn_batch_{tiroir}"):
-                        items_du_tiroir = df[df['Tiroir'] == tiroir]
-                        for _, row in items_du_tiroir.iterrows():
+                        for _, row in df[df['Tiroir'] == tiroir].iterrows():
                             iid = row['ID']
                             st.session_state['check_state'][iid] = "OK"
                             st.session_state[f"rad_{iid}"] = "Conforme"
                         st.rerun()
 
-                    # LISTE DES ITEMS
-                    items_tiroir = df[df['Tiroir'] == tiroir]
-                    for _, row in items_tiroir.iterrows():
+                    for _, row in df[df['Tiroir'] == tiroir].iterrows():
                         iid = row['ID']
                         c1, c2, c3 = st.columns([3, 1, 2])
                         with c1: st.markdown(f"**{row['Nom']}**")
                         with c2: st.markdown(f"Dot: **{row['Dotation']}**")
                         with c3:
-                            # Récupération de la valeur actuelle pour éviter le saut
                             val_defaut = st.session_state.get(f"rad_{iid}", None)
-                            
-                            status = st.radio(
-                                f"Etat {iid}", 
-                                ["Conforme", "Manquant"], 
-                                key=f"rad_{iid}", 
-                                horizontal=True, 
-                                label_visibility="collapsed", 
-                                index=None if val_defaut is None else ["Conforme", "Manquant"].index(val_defaut)
-                            )
-                            
-                            # Mise à jour du state principal
+                            status = st.radio(f"Etat {iid}", ["Conforme", "Manquant"], key=f"rad_{iid}", horizontal=True, label_visibility="collapsed", index=None if val_defaut is None else ["Conforme", "Manquant"].index(val_defaut))
                             if status == "Manquant":
                                 st.session_state['check_state'][iid] = "KO"
-                                if st.button(f"🔄 Remplacer ({row['Nom']})", key=f"fix_{iid}"): 
-                                    st.toast("Noté")
-                            elif status == "Conforme":
-                                st.session_state['check_state'][iid] = "OK"
-                            else:
-                                st.session_state['check_state'][iid] = "PENDING"
+                                if st.button(f"🔄 Remplacer ({row['Nom']})", key=f"fix_{iid}"): st.toast("Noté")
+                            elif status == "Conforme": st.session_state['check_state'][iid] = "OK"
+                            else: st.session_state['check_state'][iid] = "PENDING"
 
         st.divider()
         
-        # --- VALIDATION FINALE ---
-        all_ids = df['ID'].tolist()
-        missing = 0
-        pending = 0
-        
+        all_ids = df['ID'].tolist(); missing = 0; pending = 0
         for iid in all_ids:
             state = st.session_state['check_state'].get(iid, "PENDING")
             if state == "KO": missing += 1
@@ -557,12 +514,11 @@ def interface_checklist():
             st.markdown("</div>", unsafe_allow_html=True)
             
             if securite:
-                # COMPTE PARTAGÉ
                 user_final = st.session_state['user']
                 if st.session_state.get('user_id') in SHARED_ACCOUNTS:
                     user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire)", key="user_input_check")
 
-                if st.button("💾 VALIDER & PDF", type="primary"):
+                if st.button("💾 VALIDER CHECKLISTE", type="primary"):
                     if not user_final:
                         st.error("⚠️ Nom obligatoire.")
                     else:
@@ -570,9 +526,16 @@ def interface_checklist():
                         for _, row in df.iterrows():
                             checklist_export.append({"Nom": row['Nom'], "Tiroir": row['Tiroir'], "Dotation": row['Dotation']})
                         save_checklist_history(user_final, checklist_export)
-                        pdf = generer_pdf_checklist(checklist_export, user_final, datetime.now())
-                        st.download_button("📥 Télécharger PDF", data=pdf, file_name=f"Checklist.pdf", mime="application/pdf")
+                        # Génération PDF et stockage en session pour le bouton download persistant
+                        st.session_state['pdf_ready'] = generer_pdf_checklist(checklist_export, user_final, datetime.now())
+                        st.success("✅ Checkliste validée et archivée !")
                         st.balloons()
+                        st.rerun()
+
+                # Bouton de téléchargement persistant si un PDF a été généré
+                if st.session_state.get('pdf_ready'):
+                    st.download_button("📥 Télécharger le PDF", data=st.session_state['pdf_ready'], file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf")
+
             else:
                 st.warning("⚠️ Confirmez la sécurité pour valider.")
         else:
@@ -582,7 +545,6 @@ def interface_checklist():
 
     except Exception as e:
         st.error(f"Une erreur est survenue : {e}")
-        st.info("Essayez de rafraîchir la page.")
 
 # --- RESPONSABLE ---
 def interface_responsable():
