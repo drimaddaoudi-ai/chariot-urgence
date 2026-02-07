@@ -61,7 +61,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CONSTANTES ---
-# Liste des identifiants qui nécessitent une saisie manuelle du nom
 SHARED_ACCOUNTS = ["infirmier", "resident", "interne"]
 
 # --- 1. BACKEND (FIRESTORE) ---
@@ -69,21 +68,17 @@ SHARED_ACCOUNTS = ["infirmier", "resident", "interne"]
 def get_db():
     try:
         if not firebase_admin._apps:
-            # 1. Secrets Streamlit (Cloud)
             if "firestore" in st.secrets:
                 key_dict = dict(st.secrets["firestore"])
                 if "private_key" in key_dict:
                     key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
                 cred = credentials.Certificate(key_dict)
-            
-            # 2. Fichier local (PC)
             else:
                 if os.path.exists("firestore_key.json"):
                     cred = credentials.Certificate("firestore_key.json")
                 else:
                     st.error("🚨 Configuration introuvable : Ni Secrets Streamlit, ni fichier local.")
                     return None
-                
             firebase_admin.initialize_app(cred)
         return firestore.client()
     except Exception as e:
@@ -288,9 +283,7 @@ def login_page():
             user_info = check_login(user_id, pwd)
             if user_info:
                 st.session_state['logged_in'] = True
-                # On sauvegarde l'ID technique (ex: 'infirmier') pour savoir si c'est un compte partagé
                 st.session_state['user_id'] = user_id 
-                # On sauvegarde le nom d'affichage par défaut (ex: 'Infirmier RME')
                 st.session_state['user'] = f"{user_info['prenom']} {user_info['nom']}"
                 st.session_state['role'] = user_info['role']
                 
@@ -338,13 +331,9 @@ def interface_consommateur():
                 if not nom_row.empty: st.write(f"- {q} x **{nom_row['Nom'].values[0]}**")
             st.divider()
             
-            # Formulaire
             ip_input = st.text_input("🏥 IP DU PATIENT", placeholder="Ex: 24/12345")
             
-            # --- LOGIQUE COMPTE PARTAGÉ ---
-            # Par défaut, c'est l'utilisateur connecté
             user_final = st.session_state['user']
-            # Si c'est un compte partagé, on demande le nom
             if st.session_state.get('user_id') in SHARED_ACCOUNTS:
                 user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire pour traçabilité)", key="user_input_conso")
             
@@ -352,7 +341,7 @@ def interface_consommateur():
             if c1.button("🚀 ENREGISTRER", type="primary"):
                 if not ip_input: 
                     st.error("⚠️ IP obligatoire")
-                elif not user_final: # Vérifie que le nom est rempli si compte partagé
+                elif not user_final:
                     st.error("⚠️ Veuillez entrer votre Nom et Prénom.")
                 else:
                     valider_panier(st.session_state['panier'], ip_input, user_final)
@@ -400,7 +389,6 @@ def interface_remplacement():
                     else:
                         if st.checkbox(f"🔴 {nom}", key=f"chk_{log_id}_{item['ID']}"): to_repl.append(item['ID'])
                 
-                # --- LOGIQUE COMPTE PARTAGÉ ---
                 user_final = st.session_state['user']
                 if st.session_state.get('user_id') in SHARED_ACCOUNTS:
                     user_final = st.text_input("👤 Votre Nom et Prénom", key=f"user_input_repl_{log_id}")
@@ -517,6 +505,16 @@ def interface_checklist():
     for tiroir in ["Dessus", "Tiroir 1", "Tiroir 2", "Tiroir 3", "Tiroir 4", "Tiroir 5"]:
         if tiroir in df['Tiroir'].unique():
             with st.expander(f"🗄️ {tiroir}", expanded=True):
+                # --- NEW: BOUTON BATCH ---
+                if st.button(f"✅ Tout Conforme ({tiroir})", key=f"batch_{tiroir}"):
+                    for _, row in df[df['Tiroir'] == tiroir].iterrows():
+                        iid = row['ID']
+                        st.session_state['check_state'][iid] = "OK"
+                        # On met aussi à jour la clé du radio pour que l'UI suive
+                        st.session_state[f"rad_{iid}"] = "Conforme"
+                    st.rerun()
+                # -------------------------
+
                 for _, row in df[df['Tiroir'] == tiroir].iterrows():
                     iid = row['ID']
                     c1, c2, c3 = st.columns([3, 1, 2])
@@ -547,7 +545,6 @@ def interface_checklist():
         
         if securite_confirmee:
             
-            # --- LOGIQUE COMPTE PARTAGÉ (CHECKLISTE) ---
             user_final = st.session_state['user']
             if st.session_state.get('user_id') in SHARED_ACCOUNTS:
                 user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire)", key="user_input_check")
@@ -561,7 +558,12 @@ def interface_checklist():
                         checklist_export.append({"Nom": row['Nom'], "Tiroir": row['Tiroir'], "Dotation": row['Dotation']})
                     save_checklist_history(user_final, checklist_export)
                     pdf_bytes = generer_pdf_checklist(checklist_export, user_final, datetime.now())
-                    st.download_button("📄 Télécharger le Rapport PDF", data=pdf_bytes, file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf")
+                    st.download_button(
+                        label="📥 Télécharger PDF Archive",
+                        data=pdf_bytes,
+                        file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf",
+                        mime="application/pdf"
+                    )
                     st.balloons()
         else: st.warning("⚠️ Vous devez confirmer la sécurisation pour valider.")
     else:
