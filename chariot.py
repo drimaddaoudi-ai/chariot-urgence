@@ -27,8 +27,9 @@ st.markdown("""
         height: auto;
         padding: 0.5rem;
     }
-    input[type="text"] {
-        border: 2px solid #ff4b4b;
+    /* style input neutre (évite effet "erreur permanente") */
+    input[type="text"], input[type="password"] {
+        border: 1px solid #6c757d !important;
         border-radius: 10px;
     }
     .panier-box {
@@ -63,6 +64,7 @@ st.markdown("""
 
 # --- CONSTANTES ---
 SHARED_ACCOUNTS = ["infirmier", "resident", "interne"]
+DEBUG_LOGIN = False  # passe à True temporairement si besoin diagnostic
 
 # --- 1. BACKEND (FIRESTORE) ---
 @st.cache_resource
@@ -113,7 +115,6 @@ if db is not None:
     st.sidebar.success("✅ Firestore connecté")
 else:
     st.sidebar.error("❌ Firestore non connecté")
-
 
 # --- 2. FONCTIONS MÉTIER ---
 
@@ -351,28 +352,53 @@ def generer_pdf_checklist(data_checklist, user, date_check):
 
 # --- AUTHENTIFICATION ---
 def check_login(username, password):
+    """
+    Auth robuste:
+    - tente d'abord par ID de document exact
+    - fallback par champ 'username' ou 'identifiant'
+    - compare password en string + strip
+    """
     if db is None:
-        return None
+        return None, "DB_NONE"
     if not username:
-        return None
+        return None, "USERNAME_EMPTY"
 
     try:
-        username = username.strip()
-        doc_ref = db.collection("UTILISATEURS").document(username)
-        doc = doc_ref.get()
+        u = str(username).strip()
+        p = str(password).strip()
 
+        # 1) Tentative par ID document exact
+        doc_ref = db.collection("UTILISATEURS").document(u)
+        doc = doc_ref.get()
         if doc.exists:
             data = doc.to_dict() or {}
-            pwd_db = data.get('password')
+            pwd_db = str(data.get("password", "")).strip()
+            if pwd_db == p:
+                return data, None
+            return None, "BAD_PASSWORD_DOC_ID"
 
-            # Compare en string (évite mismatch type int/str)
-            if str(pwd_db) == str(password):
-                return data
+        # 2) Fallback: champ username
+        q1 = db.collection("UTILISATEURS").where("username", "==", u).limit(1).stream()
+        docs = list(q1)
+
+        # 3) Fallback: champ identifiant
+        if not docs:
+            q2 = db.collection("UTILISATEURS").where("identifiant", "==", u).limit(1).stream()
+            docs = list(q2)
+
+        if docs:
+            data = docs[0].to_dict() or {}
+            pwd_db = str(data.get("password", "")).strip()
+            if pwd_db == p:
+                return data, None
+            return None, "BAD_PASSWORD_QUERY"
+
+        return None, "USER_NOT_FOUND"
+
     except Exception as e:
         print(f"Erreur login: {e}")
         traceback.print_exc()
-        return None
-    return None
+        return None, f"EXCEPTION: {e}"
 
 
 def login_page():
@@ -380,7 +406,7 @@ def login_page():
     st.title("Chariot Urgence")
 
     if db is None:
-        st.error("Connexion à la base impossible. Vérifie `st.secrets['firestore']` (surtout private_key) sur Streamlit Cloud.")
+        st.error("Connexion à la base impossible. Vérifie les secrets Streamlit / fichier JSON.")
         st.stop()
 
     with st.form("login"):
@@ -392,23 +418,37 @@ def login_page():
             if not user_id or not pwd:
                 st.warning("Veuillez remplir tous les champs.")
             else:
-                user_info = check_login(user_id, pwd)
+                user_info, err = check_login(user_id, pwd)
                 if user_info:
                     st.session_state['logged_in'] = True
-                    st.session_state['user_id'] = user_id.strip()
+                    st.session_state['user_id'] = str(user_id).strip()
 
                     p = user_info.get('prenom', '')
                     n = user_info.get('nom', '')
-                    st.session_state['user'] = f"{p} {n}".strip() or user_id.strip()
+                    st.session_state['user'] = f"{p} {n}".strip() or str(user_id).strip()
                     st.session_state['role'] = user_info.get('role', 'Utilisateur')
 
                     if 'panier' not in st.session_state:
                         st.session_state['panier'] = {}
                     if 'check_state' not in st.session_state:
                         st.session_state['check_state'] = {}
+
                     st.rerun()
                 else:
                     st.error("Identifiant ou mot de passe incorrect.")
+                    if DEBUG_LOGIN:
+                        st.caption(f"Code debug login: {err}")
+
+    # Diagnostic optionnel
+    if DEBUG_LOGIN and st.checkbox("Mode diagnostic login"):
+        try:
+            docs = list(db.collection("UTILISATEURS").limit(10).stream())
+            st.write("Nb docs UTILISATEURS (max 10):", len(docs))
+            for d in docs:
+                data = d.to_dict() or {}
+                st.write("DocID:", d.id, "| clés:", list(data.keys()))
+        except Exception as e:
+            st.error(f"Diagnostic impossible: {e}")
 
 
 # --- INTERFACES PRECEDENTES ---
@@ -769,11 +809,10 @@ def interface_checklist():
                         with c2:
                             st.markdown(f"Dot: **{row.get('Dotation', '?')}**")
                         with c3:
-                            # index robuste (pas de None)
                             current = st.session_state.get(f"rad_{iid}")
                             options = ["Conforme", "Manquant"]
                             if current not in options:
-                                current = "Conforme"  # choix par défaut stable
+                                current = "Conforme"
                             idx = options.index(current)
 
                             status = st.radio(
@@ -913,11 +952,9 @@ def main():
             st.write(f"Role : {st.session_state.get('role', 'Utilisateur')}")
 
             if st.button("Déconnexion"):
-                # reset propre
-                keys_to_keep = []
+                # reset propre de toute la session
                 for k in list(st.session_state.keys()):
-                    if k not in keys_to_keep:
-                        del st.session_state[k]
+                    del st.session_state[k]
                 st.session_state['logged_in'] = False
                 st.session_state['panier'] = {}
                 st.rerun()
