@@ -7,6 +7,7 @@ import time
 from fpdf import FPDF
 import os
 import traceback
+import json
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
@@ -66,38 +67,33 @@ SHARED_ACCOUNTS = ["infirmier", "resident", "interne"]
 # --- 1. BACKEND (FIRESTORE) ---
 @st.cache_resource
 def get_db():
-    """
-    Initialise Firestore de façon robuste:
-    - priorise st.secrets["firestore"] si disponible
-    - fallback vers firestore_key.json local
-    - réutilise l'app Firebase existante si déjà initialisée
-    """
     try:
-        # Si déjà initialisé, on réutilise
-        if firebase_admin._apps:
-            return firestore.client()
+        if not firebase_admin._apps:
+            # 1. D'abord on vérifie le fichier local (Pour éviter l'erreur sur PC)
+            if os.path.exists("firestore_key.json"):
+                cred = credentials.Certificate("firestore_key.json")
+            
+            # 2. Sinon, on essaie les Secrets (Pour le Cloud)
+            else:
+                # On utilise un try/except pour éviter que st.secrets ne fasse planter l'app locale
+                try:
+                    if "firestore" in st.secrets:
+                        key_dict = dict(st.secrets["firestore"])
+                        if "private_key" in key_dict:
+                            key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
+                        cred = credentials.Certificate(key_dict)
+                    else:
+                        st.error("🚨 Pas de fichier JSON local ni de Secrets configurés.")
+                        return None
+                except Exception:
+                    st.error("🚨 Fichier 'firestore_key.json' introuvable. Veuillez le placer dans le dossier.")
+                    return None
 
-        cred = None
-
-        if "firestore" in st.secrets:
-            key_dict = dict(st.secrets["firestore"])
-            if "private_key" in key_dict and isinstance(key_dict["private_key"], str):
-                key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
-            cred = credentials.Certificate(key_dict)
-        elif os.path.exists("firestore_key.json"):
-            cred = credentials.Certificate("firestore_key.json")
-        else:
-            print("[Firestore] Aucune config trouvée (ni st.secrets['firestore'] ni firestore_key.json).")
-            return None
-
-        firebase_admin.initialize_app(cred)
+            firebase_admin.initialize_app(cred)
         return firestore.client()
-
     except Exception as e:
-        print("[Firestore] Erreur init:", e)
-        traceback.print_exc()
+        st.error(f"🚨 Erreur BDD: {e}")
         return None
-
 
 db = get_db()
 
