@@ -422,7 +422,9 @@ def interface_historique():
     if data:
         df = pd.DataFrame(data)
         cfg = {"Mat": st.column_config.TextColumn("Détail", width="large"), "ID": None}
-        if st.session_state['user'] == 'admin':
+        
+        # CORRECTION ICI : On utilise 'user_id' pour vérifier le droit Admin
+        if st.session_state.get('user_id') == 'admin':
             res = st.data_editor(df, column_config=cfg, hide_index=True, use_container_width=True, disabled=["Date","IP","User","Mat","St","Remp"])
             to_del = res[res["Suppr"]==True]
             if not to_del.empty and st.button("🗑️ Confirmer suppression"):
@@ -479,7 +481,9 @@ def interface_checklist():
                             file_name=f"Archive_Checklist_{sel_data['Date'].strftime('%Y%m%d')}.pdf",
                             mime="application/pdf"
                         )
-                if st.session_state.get('user') == 'admin':
+                
+                # CORRECTION ICI : On utilise 'user_id' pour vérifier le droit Admin
+                if st.session_state.get('user_id') == 'admin':
                     with c2:
                         st.markdown("<br>", unsafe_allow_html=True)
                         if st.button("🗑️ Supprimer", type="primary"):
@@ -505,15 +509,13 @@ def interface_checklist():
     for tiroir in ["Dessus", "Tiroir 1", "Tiroir 2", "Tiroir 3", "Tiroir 4", "Tiroir 5"]:
         if tiroir in df['Tiroir'].unique():
             with st.expander(f"🗄️ {tiroir}", expanded=True):
-                # --- NEW: BOUTON BATCH ---
+                # BOUTON BATCH
                 if st.button(f"✅ Tout Conforme ({tiroir})", key=f"batch_{tiroir}"):
                     for _, row in df[df['Tiroir'] == tiroir].iterrows():
                         iid = row['ID']
                         st.session_state['check_state'][iid] = "OK"
-                        # On met aussi à jour la clé du radio pour que l'UI suive
                         st.session_state[f"rad_{iid}"] = "Conforme"
                     st.rerun()
-                # -------------------------
 
                 for _, row in df[df['Tiroir'] == tiroir].iterrows():
                     iid = row['ID']
