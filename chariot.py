@@ -9,6 +9,21 @@ import os
 import traceback
 import json
 
+# --- 0. INITIALISATION DE LA SESSION (CRITIQUE) ---
+# Doit être fait avant toute chose pour éviter l'écran vide
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+if 'panier' not in st.session_state:
+    st.session_state['panier'] = {}
+if 'user' not in st.session_state:
+    st.session_state['user'] = ""
+if 'role' not in st.session_state:
+    st.session_state['role'] = ""
+if 'check_state' not in st.session_state:
+    st.session_state['check_state'] = {}
+if 'pdf_ready' not in st.session_state:
+    st.session_state['pdf_ready'] = None
+
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
     page_title="Chariot Urgence RME",
@@ -27,7 +42,6 @@ st.markdown("""
         height: auto;
         padding: 0.5rem;
     }
-    /* style input neutre (évite effet "erreur permanente") */
     input[type="text"], input[type="password"] {
         border: 1px solid #6c757d !important;
         border-radius: 10px;
@@ -86,9 +100,6 @@ def get_db():
         else:
             try:
                 secret_keys = list(st.secrets.keys())
-                # Aide debug (sans exposer les valeurs)
-                print("st.secrets keys =", secret_keys)
-
                 key_dict = None
 
                 # Format attendu: [firestore] ...
@@ -104,9 +115,7 @@ def get_db():
                         key_dict = {k: st.secrets[k] for k in st.secrets.keys()}
 
                 if key_dict is None:
-                    st.error(
-                        "🚨 Secrets non trouvés. Vérifie la section [firestore] dans Streamlit Cloud > Settings > Secrets."
-                    )
+                    st.error("🚨 Secrets non trouvés.")
                     return None
 
                 # Normalisation private_key
@@ -138,12 +147,7 @@ def get_db():
 db = get_db()
 if db is not None:
     st.sidebar.success("✅ Firestore connecté")
-    try:
-        db.collection("UTILISATEURS").limit(1).get()
-        st.sidebar.info("✅ Lecture UTILISATEURS OK")
-    except Exception as e:
-        st.sidebar.error("❌ Connecté mais lecture refusée")
-        st.sidebar.caption(str(e))
+    # J'ai supprimé le bloc "try get users" ICI car il bloquait l'affichage si la lecture échouait.
 else:
     st.sidebar.error("❌ Firestore non connecté")
 
@@ -174,7 +178,6 @@ def get_inventaire_df():
 
 
 def maj_panier():
-    # Parcours sécurisé des clés (copie de liste)
     for key in list(st.session_state.keys()):
         if key.startswith("input_"):
             item_id = key.replace("input_", "", 1)
@@ -375,7 +378,6 @@ def generer_pdf_checklist(data_checklist, user, date_check):
 
     pdf.cell(0, 10, f"Checkliste générée le {datetime.now().strftime('%d/%m/%Y %H:%M')}", 0, 1, 'R')
 
-    # FPDF output robuste en bytes
     pdf_str = pdf.output(dest='S')
     if isinstance(pdf_str, str):
         return pdf_str.encode('latin-1', 'replace')
@@ -384,12 +386,6 @@ def generer_pdf_checklist(data_checklist, user, date_check):
 
 # --- AUTHENTIFICATION ---
 def check_login(username, password):
-    """
-    Auth robuste:
-    - tente d'abord par ID de document exact
-    - fallback par champ 'username' ou 'identifiant'
-    - compare password en string + strip
-    """
     if db is None:
         return None, "DB_NONE"
     if not username:
@@ -434,11 +430,12 @@ def check_login(username, password):
 
 
 def login_page():
-    st.image("https://cdn-icons-png.flaticon.com/512/3063/3063176.png", width=80)
-    st.title("Chariot Urgence")
+    # Suppression de l'image si elle bloque le chargement (optionnel mais plus sûr)
+    # st.image("https://cdn-icons-png.flaticon.com/512/3063/3063176.png", width=80)
+    st.title("🚑 Chariot Urgence")
 
     if db is None:
-        st.error("Connexion à la base impossible. Vérifie les secrets Streamlit / fichier JSON.")
+        st.error("Connexion à la base impossible.")
         st.stop()
 
     with st.form("login"):
@@ -459,28 +456,11 @@ def login_page():
                     n = user_info.get('nom', '')
                     st.session_state['user'] = f"{p} {n}".strip() or str(user_id).strip()
                     st.session_state['role'] = user_info.get('role', 'Utilisateur')
-
-                    if 'panier' not in st.session_state:
-                        st.session_state['panier'] = {}
-                    if 'check_state' not in st.session_state:
-                        st.session_state['check_state'] = {}
-
                     st.rerun()
                 else:
                     st.error("Identifiant ou mot de passe incorrect.")
                     if DEBUG_LOGIN:
                         st.caption(f"Code debug login: {err}")
-
-    # Diagnostic optionnel
-    if DEBUG_LOGIN and st.checkbox("Mode diagnostic login"):
-        try:
-            docs = list(db.collection("UTILISATEURS").limit(10).stream())
-            st.write("Nb docs UTILISATEURS (max 10):", len(docs))
-            for d in docs:
-                data = d.to_dict() or {}
-                st.write("DocID:", d.id, "| clés:", list(data.keys()))
-        except Exception as e:
-            st.error(f"Diagnostic impossible: {e}")
 
 
 # --- INTERFACES PRECEDENTES ---
@@ -812,12 +792,6 @@ def interface_checklist():
             st.info("Inventaire vide.")
             return
 
-        if 'check_state' not in st.session_state:
-            st.session_state['check_state'] = {}
-
-        if 'pdf_ready' not in st.session_state:
-            st.session_state['pdf_ready'] = None
-
         tiroirs = ["Dessus", "Tiroir 1", "Tiroir 2", "Tiroir 3", "Tiroir 4", "Tiroir 5"]
 
         for tiroir in tiroirs:
@@ -910,15 +884,13 @@ def interface_checklist():
                         st.balloons()
                         st.rerun()
 
-                if st.session_state.get('pdf_ready'):
-                    st.download_button(
-                        "📥 Télécharger le PDF",
-                        data=st.session_state['pdf_ready'],
-                        file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf",
-                        mime="application/pdf"
-                    )
-            else:
-                st.warning("⚠️ Confirmez la sécurité pour valider.")
+            if st.session_state.get('pdf_ready'):
+                st.download_button(
+                    "📥 Télécharger le PDF",
+                    data=st.session_state['pdf_ready'],
+                    file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf"
+                )
         else:
             if pending > 0:
                 st.warning(f"⚠️ Reste à vérifier : {pending} lignes.")
@@ -971,11 +943,6 @@ def interface_responsable():
 
 # --- MENU PRINCIPAL ---
 def main():
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-    if 'panier' not in st.session_state:
-        st.session_state['panier'] = {}
-
     if not st.session_state['logged_in']:
         login_page()
     else:
@@ -984,7 +951,6 @@ def main():
             st.write(f"Role : {st.session_state.get('role', 'Utilisateur')}")
 
             if st.button("Déconnexion"):
-                # reset propre de toute la session
                 for k in list(st.session_state.keys()):
                     del st.session_state[k]
                 st.session_state['logged_in'] = False
