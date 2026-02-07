@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 from fpdf import FPDF
 import os
-import json # Correction : import placé au bon endroit
+import json 
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
@@ -60,23 +60,23 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- CONSTANTES ---
+# Liste des identifiants qui nécessitent une saisie manuelle du nom
+SHARED_ACCOUNTS = ["infirmier", "resident", "interne"]
+
 # --- 1. BACKEND (FIRESTORE) ---
 @st.cache_resource
 def get_db():
     try:
         if not firebase_admin._apps:
-            # 1. On essaie de lire les secrets Streamlit (Cloud)
+            # 1. Secrets Streamlit (Cloud)
             if "firestore" in st.secrets:
-                # On convertit l'objet secrets en dictionnaire standard
                 key_dict = dict(st.secrets["firestore"])
-                
-                # Correction critique pour la clé privée sur le Cloud
                 if "private_key" in key_dict:
                     key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
-                
                 cred = credentials.Certificate(key_dict)
             
-            # 2. Sinon, on cherche le fichier local (Ton PC)
+            # 2. Fichier local (PC)
             else:
                 if os.path.exists("firestore_key.json"):
                     cred = credentials.Certificate("firestore_key.json")
@@ -288,8 +288,12 @@ def login_page():
             user_info = check_login(user_id, pwd)
             if user_info:
                 st.session_state['logged_in'] = True
+                # On sauvegarde l'ID technique (ex: 'infirmier') pour savoir si c'est un compte partagé
+                st.session_state['user_id'] = user_id 
+                # On sauvegarde le nom d'affichage par défaut (ex: 'Infirmier RME')
                 st.session_state['user'] = f"{user_info['prenom']} {user_info['nom']}"
                 st.session_state['role'] = user_info['role']
+                
                 if 'panier' not in st.session_state: st.session_state['panier'] = {}
                 if 'check_state' not in st.session_state: st.session_state['check_state'] = {}
                 st.rerun()
@@ -333,16 +337,30 @@ def interface_consommateur():
                 nom_row = df[df['ID'] == pid]
                 if not nom_row.empty: st.write(f"- {q} x **{nom_row['Nom'].values[0]}**")
             st.divider()
+            
+            # Formulaire
             ip_input = st.text_input("🏥 IP DU PATIENT", placeholder="Ex: 24/12345")
+            
+            # --- LOGIQUE COMPTE PARTAGÉ ---
+            # Par défaut, c'est l'utilisateur connecté
+            user_final = st.session_state['user']
+            # Si c'est un compte partagé, on demande le nom
+            if st.session_state.get('user_id') in SHARED_ACCOUNTS:
+                user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire pour traçabilité)", key="user_input_conso")
+            
             c1, c2 = st.columns([2,1])
             if c1.button("🚀 ENREGISTRER", type="primary"):
-                if not ip_input: st.error("⚠️ IP obligatoire")
+                if not ip_input: 
+                    st.error("⚠️ IP obligatoire")
+                elif not user_final: # Vérifie que le nom est rempli si compte partagé
+                    st.error("⚠️ Veuillez entrer votre Nom et Prénom.")
                 else:
-                    valider_panier(st.session_state['panier'], ip_input, st.session_state['user'])
+                    valider_panier(st.session_state['panier'], ip_input, user_final)
                     st.session_state['panier'] = {}
                     for k in list(st.session_state.keys()):
                         if k.startswith("input_"): del st.session_state[k]
                     time.sleep(1); st.success("Enregistré !"); st.rerun()
+            
             if c2.button("🗑️ Vider"):
                 st.session_state['panier'] = {}
                 for k in list(st.session_state.keys()):
@@ -381,10 +399,19 @@ def interface_remplacement():
                     if item.get('EstRemplace', False): st.markdown(f"~~✅ {nom}~~")
                     else:
                         if st.checkbox(f"🔴 {nom}", key=f"chk_{log_id}_{item['ID']}"): to_repl.append(item['ID'])
+                
+                # --- LOGIQUE COMPTE PARTAGÉ ---
+                user_final = st.session_state['user']
+                if st.session_state.get('user_id') in SHARED_ACCOUNTS:
+                    user_final = st.text_input("👤 Votre Nom et Prénom", key=f"user_input_repl_{log_id}")
+
                 if st.form_submit_button("💾 Valider"):
-                    if not to_repl: st.warning("Rien coché")
+                    if not to_repl: 
+                        st.warning("Rien coché")
+                    elif not user_final:
+                        st.error("⚠️ Nom obligatoire")
                     else:
-                        fin = effectuer_remplacement_partiel(log_id, l, to_repl, st.session_state['user'])
+                        fin = effectuer_remplacement_partiel(log_id, l, to_repl, user_final)
                         st.success("Fait !" if fin else "Partiel enregistré"); time.sleep(1); st.rerun()
     if count == 0: st.success("Tout est à jour !")
 
@@ -519,14 +546,23 @@ def interface_checklist():
         st.markdown("</div>", unsafe_allow_html=True)
         
         if securite_confirmee:
+            
+            # --- LOGIQUE COMPTE PARTAGÉ (CHECKLISTE) ---
+            user_final = st.session_state['user']
+            if st.session_state.get('user_id') in SHARED_ACCOUNTS:
+                user_final = st.text_input("👤 Votre Nom et Prénom (Obligatoire)", key="user_input_check")
+
             if st.button("💾 VALIDER LA CHECKLISTE & PDF", type="primary"):
-                checklist_export = []
-                for _, row in df.iterrows():
-                    checklist_export.append({"Nom": row['Nom'], "Tiroir": row['Tiroir'], "Dotation": row['Dotation']})
-                save_checklist_history(st.session_state['user'], checklist_export)
-                pdf_bytes = generer_pdf_checklist(checklist_export, st.session_state['user'], datetime.now())
-                st.download_button("📄 Télécharger le Rapport PDF", data=pdf_bytes, file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf")
-                st.balloons()
+                if not user_final:
+                    st.error("⚠️ Veuillez entrer votre Nom et Prénom.")
+                else:
+                    checklist_export = []
+                    for _, row in df.iterrows():
+                        checklist_export.append({"Nom": row['Nom'], "Tiroir": row['Tiroir'], "Dotation": row['Dotation']})
+                    save_checklist_history(user_final, checklist_export)
+                    pdf_bytes = generer_pdf_checklist(checklist_export, user_final, datetime.now())
+                    st.download_button("📄 Télécharger le Rapport PDF", data=pdf_bytes, file_name=f"Checklist_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf")
+                    st.balloons()
         else: st.warning("⚠️ Vous devez confirmer la sécurisation pour valider.")
     else:
         if pending_count > 0: st.warning(f"⚠️ Vous devez vérifier toutes les lignes ({pending_count} restants).")
